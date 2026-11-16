@@ -53,6 +53,7 @@ class MatchSession:
         log: Optional[Callable[[str], None]] = None,
         replay: Optional[ReplayWriter] = None,
         emit: Optional[Callable[[str, dict], None]] = None,
+        planner: Optional[str] = None,
     ):
         self.transport = transport
         self.search_seconds = search_seconds
@@ -60,6 +61,7 @@ class MatchSession:
         self.role_seconds = role_seconds
         self.seed = seed
         self.weights = weights
+        self.planner = (planner or os.environ.get("HEXUDON_PLANNER", "contest")).strip().lower()
         self.log = log or (lambda msg: None)
         self.replay = replay or (lambda entry: None)
         #: web trực quan hoá: emit(kind, data) hoặc None
@@ -89,7 +91,16 @@ class MatchSession:
         if self.emit is not None:
             from ..viz.shapes import config_payload
             self.emit("match_start", {"mode": "online", "config": config_payload(self.config)})
-        self.strategist = MatchStrategist(
+
+        if self.planner in ("alns", "old", "legacy"):
+            from ..planner.strategy import MatchStrategist as StratCls
+        else:
+            try:
+                from ..planner_contest.strategy import MatchStrategist as StratCls
+            except ImportError:
+                from ..planner.strategy import MatchStrategist as StratCls
+
+        self.strategist = StratCls(
             self.config, weights=self.weights, search_seconds=self.search_seconds,
             net_margin=self.net_margin, role_seconds=self.role_seconds,
             seed=self.seed, log=self.log, emit=self.emit,

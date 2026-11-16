@@ -109,7 +109,8 @@ def play_one(args, tok: TeamToken, log: Log) -> int:
                                  token_reload=tok.reload, token_var=tok.var, log=log, replay=replay)
         session = MatchSession(transport, search_seconds=args.search_seconds,
                                net_margin=args.net_margin, role_seconds=args.role_seconds,
-                               seed=args.seed, log=log, replay=replay, emit=emit)
+                               seed=args.seed, log=log, replay=replay, emit=emit,
+                               planner=getattr(args, "planner", None))
         try:
             session.run()
         except KeyboardInterrupt:

@@ -7,11 +7,19 @@ from typing import Dict, List, Optional, Sequence
 
 from .. import rules
 from ..model import AgentState, DayState, MatchConfig
+import os
 from ..planner.decoder import decode
 from ..planner.construct import construct
 from ..planner.engine import make_context, plan_day
 from ..planner.solution import Weights
-from ..planner.strategy import MatchStrategist
+
+if os.environ.get("HEXUDON_PLANNER", "contest").strip().lower() in ("alns", "old", "legacy"):
+    from ..planner.strategy import MatchStrategist
+else:
+    try:
+        from ..planner_contest.strategy import MatchStrategist
+    except ImportError:
+        from ..planner.strategy import MatchStrategist
 from ..traffic import TrafficForecast
 
 

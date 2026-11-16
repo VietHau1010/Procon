@@ -54,6 +54,7 @@ def cmd_play(args) -> int:
     session = MatchSession(
         transport, search_seconds=args.search_seconds, net_margin=args.net_margin,
         role_seconds=args.role_seconds, seed=args.seed, log=_log, replay=replay,
+        planner=getattr(args, "planner", None),
     )
     try:
         result = session.run()
@@ -73,6 +74,7 @@ def cmd_sandbox(args) -> int:
     session = MatchSession(
         transport, search_seconds=args.search_seconds, net_margin=args.net_margin,
         role_seconds=args.role_seconds, seed=args.seed, log=_log, replay=replay,
+        planner=getattr(args, "planner", None),
     )
     try:
         session.run()
@@ -438,6 +440,8 @@ def build_parser() -> argparse.ArgumentParser:
                        help="ngân sách chọn vai trò (tự rút lại theo startsAt)")
         p.add_argument("--net-margin", type=float, default=1.5, help="lề thời gian chừa cho mạng")
         p.add_argument("--seed", type=int, default=0)
+        p.add_argument("--planner", choices=["contest", "alns"], default="contest",
+                       help="chọn bộ chiến thuật: contest (chiến thuật mới tối ưu) hoặc alns (chiến thuật cũ)")
 
     def web_common(p):
         p.add_argument("--url", default=DEFAULT_URL, help="server thi (mặc định %(default)s)")
@@ -457,6 +461,8 @@ def build_parser() -> argparse.ArgumentParser:
                        help="mất liên lạc quá lâu thì thoát thay vì quay vô hạn")
         p.add_argument("--seed", type=int, default=0)
         p.add_argument("--out-dir", default="replays", help="thư mục ghi replay và tổng kết")
+        p.add_argument("--planner", choices=["contest", "alns"], default="contest",
+                       help="chọn bộ chiến thuật: contest (chiến thuật mới tối ưu) hoặc alns (chiến thuật cũ)")
 
     p = sub.add_parser("play", help="thi đấu qua HTTP")
     p.add_argument("--url", required=True, help="ví dụ http://10.0.0.5:8099")
