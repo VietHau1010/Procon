@@ -232,7 +232,10 @@ def cmd_serve(args) -> int:
 
 
 def cmd_roles(args) -> int:
-    from .planner.roles import select_roles
+    if args.planner == "contest":
+        from .planner_contest.roles import select_roles
+    else:
+        from .planner.roles import select_roles
 
     config = _load_config(args.map)
     kinds, options = select_roles(config, budget_seconds=args.role_seconds, seed=args.seed, log=_log)
@@ -290,6 +293,9 @@ def cmd_web(args) -> int:
     for tok in tokens:
         for warning in tok.warnings:
             _log("CẢNH BÁO: " + warning)
+    if getattr(args, "weights_run", None) and args.live:
+        _log("--weights-run chỉ được dùng với token test trong Mock Contest, không dùng --live")
+        return 2
     if args.events and (args.live or args.follow or len(tokens) > 1):
         _log("--events chỉ dùng khi chơi một câu với một token test, không dùng khi thi thật (--live)")
         return 2
@@ -433,6 +439,8 @@ def cmd_viz(args) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="hexudon", description="Bot HEXUDON — Procon Việt Nam 2026")
     sub = parser.add_subparsers(dest="command", required=True)
+    from .training.cli import add_parser as add_training_parser
+    add_training_parser(sub)
 
     def common(p):
         p.add_argument("--search-seconds", type=float, default=3.0, help="ngân sách tìm kiếm mỗi ngày")
@@ -584,6 +592,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="ghi sự kiện suy luận ra file JSONL (web trực quan hoá); chỉ khi chơi một câu, một token")
     p.add_argument("--summary", default=None, help=argparse.SUPPRESS)
     p.add_argument("--label", default=None, help=argparse.SUPPRESS)
+    p.add_argument("--weights-run", default=None,
+                   help="run train đã đóng băng; chỉ cho TEST token và Mock Contest")
     p.set_defaults(func=cmd_web)
 
     p = sub.add_parser("web-bench", help="chạy loạt câu practice trên server thi, so điểm với đội khác")

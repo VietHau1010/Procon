@@ -91,6 +91,36 @@ def play_one(args, tok: TeamToken, log: Log) -> int:
     if args.live and ref.mode != CONTEST:
         log(f"--live chỉ chơi trận contest; {ref.label()} là {ref.mode}")
         return 2
+    weights = None
+    weights_run = getattr(args, "weights_run", None)
+    if weights_run:
+        if args.live or not tok.var.startswith("TEST_"):
+            log("--weights-run chỉ được dùng với token test trong Mock Contest")
+            return 2
+        if ref.match_id is None or not ref.match_name:
+            # --follow children receive --game, which resolves to a bare
+            # GameRef without its match metadata. Verify the exact game with
+            # the manager; never trust the user-supplied --label as proof.
+            try:
+                verified = [item for item in fetch_questions(lookup, log)
+                            if item.game_id == ref.game_id]
+            except ResolveError as exc:
+                log(f"không xác minh được trận của model thử: {exc}")
+                return 2
+            if len(verified) != 1:
+                log("không xác minh được đúng một câu Mock Contest cho model thử")
+                return 2
+            ref = verified[0]
+        if ref.mode != CONTEST or "mock" not in (ref.match_name or "").casefold():
+            log("--weights-run chỉ được dùng với token test trong Mock Contest")
+            return 2
+        from ..planner.solution import Weights
+        from ..training.storage import load_policy
+        try:
+            weights = Weights(**load_policy(weights_run))
+        except (OSError, ValueError, KeyError) as exc:
+            log(f"không nạp được model của run {weights_run}: {exc}")
+            return 2
     if args.live:
         banner(tok, ref, log)
     replay_path, summary_path = run_paths(args, ref, tok)
@@ -109,7 +139,7 @@ def play_one(args, tok: TeamToken, log: Log) -> int:
                                  token_reload=tok.reload, token_var=tok.var, log=log, replay=replay)
         session = MatchSession(transport, search_seconds=args.search_seconds,
                                net_margin=args.net_margin, role_seconds=args.role_seconds,
-                               seed=args.seed, log=log, replay=replay, emit=emit,
+                               seed=args.seed, weights=weights, log=log, replay=replay, emit=emit,
                                planner=getattr(args, "planner", None))
         try:
             session.run()
@@ -120,7 +150,9 @@ def play_one(args, tok: TeamToken, log: Log) -> int:
         predicted = list(session.strategist.score_tuple()) if session.strategist else None
         summary = transport.finish(summary_path, extra={
             "team_name": tok.team_name, "token_var": tok.var,
-            "predicted": predicted, "roles": transport.kinds})
+            "predicted": predicted, "roles": transport.kinds,
+            "planner_context": session.planner_context,
+            "weights_run": os.path.abspath(weights_run) if weights_run else None})
         if emit is not None:
             emit("match_end", {"score": summary.get("score"), "replay_check": summary.get("replay_check"),
                                "predicted": predicted})
@@ -161,6 +193,8 @@ def child_command(args, ref: GameRef, token_var: str, summary_path: str, label: 
            "--search-seconds", _auto(args.search_seconds), "--role-seconds", _auto(args.role_seconds)]
     if ref.mode == PRACTICE:
         cmd.append("--practice")
+    if getattr(args, "weights_run", None):
+        cmd += ["--weights-run", os.path.abspath(args.weights_run)]
     if getattr(args, "keep", False):
         cmd.append("--keep")
     cmd += ["--live"] if args.live else ["--token-env", token_var]

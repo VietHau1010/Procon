@@ -11,6 +11,7 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple
 from ..planner.solution import DayContext, DaySolution, Meet
 from .construct import construct, repair
 from .decoder import Decoded, decode
+from .objective import coverage_key
 
 DESTROY_OPS = ("random", "zero_gain", "related", "chain_dup", "tail", "meet_toggle")
 REPAIR_OPS = ("greedy", "regret", "coverage")
@@ -55,6 +56,11 @@ def _remove_stops(sol: DaySolution, victims: Sequence[Tuple[int, int]]) -> DaySo
 
     new_waits = {}
     for (s, idx), w in sol.waits.items():
+        if idx < 0:
+            # Start-of-day refuel waits have no tour stop to remap. Dropping
+            # them can remove the only fuel rescue for a stranded patrol.
+            new_waits[(s, idx)] = w
+            continue
         new_idx = remap.get((s, idx), -1)
         if new_idx >= 0:
             new_waits[(s, new_idx)] = w
@@ -220,6 +226,7 @@ def improve(
     cur = start.copy() if start is not None else construct(ctx, rng)
     cur_dec = decode(ctx, cur)
     best, best_dec = cur.copy(), cur_dec
+    coverage_sol, coverage_dec = cur.copy(), cur_dec
     if on_better is not None:
         on_better(best, best_dec)
 
@@ -254,6 +261,10 @@ def improve(
         cand = repair(ctx, cand, rng, mode=r_name)
         cand_dec = decode(ctx, cand)
         s = cand_dec.score
+        if coverage_key(ctx, cand_dec) > coverage_key(ctx, coverage_dec):
+            coverage_sol, coverage_dec = cand.copy(), cand_dec
+            if on_better is not None:
+                on_better(coverage_sol, coverage_dec)
 
         if s > best_dec.score:
             best, best_dec = cand.copy(), cand_dec
@@ -285,6 +296,10 @@ def improve(
             cur = destroy_random(ctx, best.copy(), rng, max(2, max_stops // 2))
             cur = repair(ctx, cur, rng, mode="coverage")
             cur_dec = decode(ctx, cur)
+            if coverage_key(ctx, cur_dec) > coverage_key(ctx, coverage_dec):
+                coverage_sol, coverage_dec = cur.copy(), cur_dec
+                if on_better is not None:
+                    on_better(coverage_sol, coverage_dec)
             since_best = 0
 
         if on_progress is not None and time.monotonic() >= next_progress:
@@ -293,4 +308,4 @@ def improve(
 
     if on_progress is not None:
         report()
-    return AlnsResult(best, best_dec, it, time.monotonic() - began)
+    return AlnsResult(coverage_sol, coverage_dec, it, time.monotonic() - began)

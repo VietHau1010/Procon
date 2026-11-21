@@ -51,6 +51,43 @@ class PlannerContestTest(unittest.TestCase):
         roles_5 = choose_roles_for_match(5, 200, 20, 20)
         self.assertEqual(roles_5, [rules.PATROL, rules.PATROL, rules.PATROL, rules.PATROL, rules.REFUEL])
 
+    def test_contest_roles_always_use_one_refuel_agent(self):
+        config = self.config
+        config.agent_starts = list(range(7))
+        config.__post_init__()
+        roles = choose_roles_for_match(config)
+        self.assertEqual(roles.count(rules.REFUEL), 1)
+
+    def test_role_rollout_candidates_all_have_one_refuel_agent(self):
+        from hexudon.planner_contest.roles import select_roles
+        from hexudon.offline.mapgen import generate
+
+        config = generate(seed=17, size=30, agents=8, days=2)
+        config.fuel_limits = 90
+        config.__post_init__()
+        selected, candidates = select_roles(config, budget_seconds=0, iterations_per_day=1)
+        self.assertEqual(selected.count(rules.REFUEL), 1)
+        self.assertTrue(candidates)
+        self.assertTrue(all(c.kinds.count(rules.REFUEL) == 1 for c in candidates))
+
+    def test_role_selector_discards_zero_and_multiple_refuel_candidates(self):
+        from unittest.mock import patch
+        from hexudon.offline.mapgen import generate
+        from hexudon.planner.roles import RoleCandidate
+        from hexudon.planner_contest.roles import select_roles
+
+        cfg = generate(seed=23, size=8, agents=5, days=2)
+        one = [0, 0, 0, 0, 1]
+        opts = [RoleCandidate([0]*5, "zero"), RoleCandidate(one, "one"),
+                RoleCandidate([0, 0, 1, 1, 1], "three")]
+        with patch("hexudon.planner_contest.roles.choose_roles_for_match", return_value=one), \
+             patch("hexudon.planner_contest.roles.candidates", return_value=opts), \
+             patch("hexudon.planner_contest.roles._rollout_contest",
+                   return_value=((1, 2, 3), cfg.n_days)):
+            chosen, evaluated = select_roles(cfg, iterations_per_day=1)
+        self.assertEqual(chosen.count(rules.REFUEL), 1)
+        self.assertTrue(all(c.kinds.count(rules.REFUEL) == 1 for c in evaluated))
+
     def test_default_weights(self):
         w = default_contest_weights()
         self.assertEqual(w.serving, 20.0)

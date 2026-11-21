@@ -5,6 +5,14 @@ Việt Nam 2026 / NAPROCK PROCON lần 18.
 
 Python thuần, **không cài gì thêm** — chỉ thư viện chuẩn. Yêu cầu Python 3.10 trở lên.
 
+## Huấn luyện chiến thuật offline
+
+Đã có `python -m hexudon train`: học tiến hóa trọng số quanh baseline
+`planner_contest` được đóng băng, lưu checkpoint/resume và kiểm định trên
+train/validation/test riêng. Không dùng token, không tự thay bot thi thật.
+Xem [hướng dẫn training](hexudon/training/README.md) để khởi tạo, học liên tục,
+đánh giá model và hiểu giới hạn của cổng không-thua trên bộ kiểm thử.
+
 ```bash
 git clone <repo> && cd procon-2026
 python -m unittest discover -s tests     # 262 test, phải xanh toàn bộ (Windows, macOS, Linux)
@@ -48,6 +56,17 @@ Mỗi lần chơi ghi vào `replays/`: replay JSON Lines, file `-summary.json` (
 quả đối chiếu simulator) và `-replay.json` (replay của server). Practice được reset sau
 khi đã lưu kết quả, để đội khác không đọc được lộ trình qua `/practice/peer`; thêm
 `--keep` nếu muốn xem lại trên website.
+
+Để thử một model train chưa promotion, có thể truyền `--weights-run` khi chạy
+Mock Contest. Cờ này bị từ chối với `--live` và chỉ chạy khi tên trận có “Mock”:
+
+```powershell
+python -m hexudon web --match 14 --follow --token-env TEST_DAU_02 `
+       --weights-run artifacts/train-web-fast-20261120
+```
+
+Model chỉ áp dụng cho tiến trình test; champion mặc định và bot thi thật không
+bị thay đổi.
 
 ### Thi đấu trên server kiểu PTIT (HTTP)
 

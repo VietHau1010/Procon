@@ -1,13 +1,9 @@
-"""Hàm mục tiêu chuẩn cho giải đấu Procon:
-Tuân thủ tuyệt đối thứ tự từ điển: L (tổng nhãn toàn giải) > D (tổng nhãn mỗi ngày) > Q (tổng khẩu phần udon).
+"""Điểm tìm kiếm: lợi ích hôm nay cộng ước lượng giá trị cuối ngày.
 
-Cải tiến then chốt:
-1. Đặt w.serving = 20.0, w.fuel_bonus = 0.01: Nhiên liệu chỉ dùng để phân định thắng thua khi
-   điểm khẩu phần bằng nhau, tuyệt đối không bao giờ hi sinh udon để tiết kiệm xăng.
-2. Fuel Safety Penalty: Phạt nặng xe tuần tra kết thúc ngày với lượng xăng < 50 mà không có xe
-   tiếp nhiên liệu đứng kèm, ngăn chặn triệt để thảm hoạ kẹt xăng qua ngày hôm sau.
-3. Dead-end Clumping Penalty: Phạt dồn nhiều hơn 1 xe vào cụm ngõ cụt xa {5, 34, 40, 142, 197, 233}.
-4. End-on-Spot Bonus: Thưởng đỗ xe cuối ngày tại ô quán ăn để ngày hôm sau tự động ăn điểm ở bước 1.
+Đây là heuristic cho cả trận, không phải thứ tự từ điển chính xác của một
+ngày: có thể đổi điểm hôm nay lấy vị trí/xăng cho ngày mai. Kết quả benchmark
+và chọn vai trò được so bằng tuple (L, D, Q) thật. Điểm đỗ xe được giới hạn
+theo số nhãn và kho, không phụ thuộc ID ô của một map cụ thể.
 """
 
 from typing import Dict, List, Sequence
@@ -31,7 +27,10 @@ def default_contest_weights() -> Weights:
         near_chain=0.4,
         strand=2.0,           # Phạt mạnh kẹt xăng qua ngày
         fuel_bonus=0.01,      # Giảm từ 1.0 xuống 0.01 để xăng không cạnh tranh với udon
-        road_park=0.05,
+        # Experimental learned weight, enabled by user request. Q03 runs
+        # observed 763 and 819, but differed in tanker and wall-clock search;
+        # they do not establish a causal gain or a multi-map improvement.
+        road_park=0.0387433,
         diag_penalty=0.01,
     )
 
@@ -73,17 +72,20 @@ def end_value(ctx: DayContext, result: DayResult) -> float:
         else:
             value -= w.urgency * B * min(1.0, best / max(1, steps_rest))
 
-    # V_spot: kết thúc trên spot thì hôm sau thu miễn phí ở bước 1
+    # Value tomorrow's free collections once per brand and within its stock.
     spot_at = cfg.spot_index_at
+    parked = {}
     for c in patrol_cells:
         if c in spot_at:
-            value += w.end_on_spot * B + w.serving
-
-    # V_deadend: chống kẹt xe ở ngõ cụt xa ({5, 34, 40, 142, 197, 233})
-    dead_end_spots = {5, 34, 40, 142, 197, 233}
-    dead_end_count = sum(1 for c in patrol_cells if c in dead_end_spots)
-    if dead_end_count > 1:
-        value -= w.cover_penalty * B * (dead_end_count - 1)
+            parked[c] = parked.get(c, 0) + 1
+    free_brands = set()
+    for cell, count in parked.items():
+        spot = cfg.spots[spot_at[cell]]
+        servings = min(count, spot.stocks)
+        if servings > 0:
+            free_brands.add(spot.brand)
+            value += w.serving * servings
+    value += w.end_on_spot * B * len(free_brands)
 
     # V_near: chuỗi có thể với tới trong nửa ngày mai
     if ctx.next_steps > 0:
@@ -131,3 +133,16 @@ def lexicographic_gain(ctx: DayContext, result: DayResult) -> tuple:
     """Phần tăng thật theo thứ tự từ điển, dùng để so sánh và báo cáo."""
     new = len(result.brands - ctx.visited_brands)
     return (new, len(result.brands), result.servings)
+
+
+def coverage_key(ctx: DayContext, decoded) -> tuple:
+    """Archive actual collected types before heuristic position/fuel/Q value.
+
+    Keep the scalar search objective for exploration and terminal valuation;
+    only selection of the retained plan gives L/D strict priority. Counting
+    planned stops here would incorrectly reward routes truncated by decoding.
+    """
+    if not decoded.result.ok:
+        return (-1, -1, float("-inf"))
+    new, daily, servings = lexicographic_gain(ctx, decoded.result)
+    return (new, daily, servings, decoded.score)

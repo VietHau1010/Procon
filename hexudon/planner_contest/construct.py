@@ -89,6 +89,8 @@ class InsertionState:
         ctx = self.ctx
         w = ctx.weights
         brand = ctx.spot_brand[spot]
+        if ctx.stocks[spot] <= self.targeted.get(spot, 0):
+            return 0.0
         gain = 0.0
         if self.covered.get(brand, 0) == 0:
             gain += w.B
@@ -151,7 +153,7 @@ class InsertionState:
             if self.covered.get(b, 0) == 0:
                 for si in self.ctx.config.spots_by_brand.get(b, ()):
                     candidates.add(si)
-        return tuple(candidates)
+        return tuple(sorted(candidates))
 
     def best_insertion(
         self,
@@ -219,6 +221,72 @@ class InsertionState:
                 best_regret = value
                 best = top[1]
         return best
+
+
+def trim_excess_stock(ctx: DayContext, sol: DaySolution) -> DaySolution:
+    """Propose removing over-targeted stops, preserving refuel and wait anchors.
+
+    Master-cycle construction is intentionally route-first and may duplicate a
+    spot across patrols. The simulator correctly rejects the extra collections,
+    but carrying those stops into ALNS wastes search time. Remove the most
+    expensive redundant occurrence, preserving the cheapest useful visit. This
+    is a route-model estimate: incidental collections still require decoding.
+    """
+    current = sol.copy()
+    counts: Dict[int, int] = {}
+    for tour in current.tours:
+        for spot in tour:
+            counts[spot] = counts.get(spot, 0) + 1
+
+    def remove_one(slot: int, index: int) -> None:
+        current.tours[slot].pop(index)
+        new_meets = []
+        for meet in current.meets:
+            if meet.patrol != slot or meet.stop_idx < 0:
+                new_meets.append(meet)
+            elif meet.stop_idx == index:
+                continue
+            else:
+                new_meets.append(
+                    Meet(meet.patrol, meet.stop_idx - 1 if meet.stop_idx > index
+                         else meet.stop_idx, meet.car)
+                )
+        current.meets = new_meets
+        current.waits = {
+            (s, i - 1 if s == slot and i > index else i): wait
+            for (s, i), wait in current.waits.items()
+            if not (s == slot and i == index)
+        }
+
+    for spot, count in list(counts.items()):
+        excess = max(0, count - max(0, int(ctx.stocks[spot])))
+        for _ in range(excess):
+            candidates = []
+            target = ctx.spot_cells[spot]
+            for slot, tour in enumerate(current.tours):
+                for index, value in enumerate(tour):
+                    if value != spot:
+                        continue
+                    if any(m.patrol == slot and m.stop_idx == index for m in current.meets):
+                        continue
+                    if current.waits.get((slot, index), 0) > 0:
+                        continue
+                    cells = [ctx.start_of_patrol(slot)] + [ctx.spot_cells[s] for s in tour]
+                    prev = cells[index]
+                    nxt = cells[index + 2] if index + 2 < len(cells) else None
+                    old = ctx.dist_step.cost(prev, target)
+                    if nxt is not None:
+                        old += ctx.dist_step.cost(target, nxt)
+                        new = ctx.dist_step.cost(prev, nxt)
+                    else:
+                        new = 0
+                    if old != INF and new != INF:
+                        candidates.append((old - new, slot, index))
+            if not candidates:
+                break
+            _, slot, index = max(candidates)
+            remove_one(slot, index)
+    return current
 
 
 def add_fuel_meets(ctx: DayContext, sol: DaySolution) -> DaySolution:
@@ -308,6 +376,36 @@ def construct_master(ctx: DayContext, rng: Optional[random.Random] = None) -> Da
     cycle = build_master_cycle(ctx)
     n = len(cycle)
     spot_cells = ctx.spot_cells
+    if not n or not ctx.n_patrols:
+        return ctx.empty_solution()
+
+    cycle_detours: Dict[int, float] = {}
+    for i, sp in enumerate(cycle):
+        p_c = spot_cells[cycle[(i - 1) % n]]
+        s_c = spot_cells[sp]
+        n_c = spot_cells[cycle[(i + 1) % n]]
+        d = table.cost(p_c, s_c) + table.cost(s_c, n_c) - table.cost(p_c, n_c)
+        cycle_detours[sp] = d
+
+    # 1. Điểm ngoại lai dư thừa: nhãn hàng đã có >= 2 quán, độ lệch >= 12
+    redundant_outliers = {
+        sp
+        for sp in cycle
+        if len(ctx.config.spots_by_brand.get(ctx.spot_brand[sp], ())) >= 2
+        and cycle_detours[sp] >= 12
+    }
+    # 2. Điểm ngoại lai bắt buộc duy nhất: nhãn hàng chỉ có 1 quán, độ lệch >= 20
+    solitary_outliers = {
+        sp
+        for sp in cycle
+        if len(ctx.config.spots_by_brand.get(ctx.spot_brand[sp], ())) == 1
+        and cycle_detours[sp] >= 20
+    }
+
+    # Bỏ qua điểm ngoại lai dư thừa ở những ngày ngắn/trung bình (<= 160 bước)
+    core_cycle = [
+        sp for sp in cycle if not (ctx.steps <= 160 and sp in redundant_outliers)
+    ] or cycle
 
     hub_candidates = sorted(
         range(n),
@@ -319,7 +417,15 @@ def construct_master(ctx: DayContext, rng: Optional[random.Random] = None) -> Da
     tours: List[List[int]] = []
     for slot in range(ctx.n_patrols):
         start_c = ctx.start_of_patrol(slot)
-        entry_idx = min(range(n), key=lambda i: table.cost(start_c, spot_cells[cycle[i]]))
+        # Đúng 1 xe tuần tra đại diện ghé điểm ngoại lai đơn lẻ ở ngày ngắn (<= 160 bước)
+        is_designated = slot == (ctx.day % ctx.n_patrols)
+        car_cycle = [
+            sp
+            for sp in core_cycle
+            if (ctx.steps > 160 or is_designated or sp not in solitary_outliers)
+        ] or core_cycle
+        car_n = len(car_cycle)
+        entry_idx = min(range(car_n), key=lambda i: table.cost(start_c, spot_cells[car_cycle[i]]))
 
         best_t: List[int] = []
         for direction in [1, -1]:
@@ -327,17 +433,22 @@ def construct_master(ctx: DayContext, rng: Optional[random.Random] = None) -> Da
             cur_c = start_c
             steps = 0
             idx = entry_idx
+            visited_in_tour = set()
             while True:
-                sp = cycle[idx]
+                sp = car_cycle[idx]
                 nxt_c = spot_cells[sp]
                 s = table.cost(cur_c, nxt_c)
                 if steps + s > ctx.steps:
                     break
                 cur_t.append(sp)
+                visited_in_tour.add(sp)
                 steps += s
                 cur_c = nxt_c
-                idx = (idx + direction) % n
-                if idx == entry_idx:
+                idx = (idx + direction) % car_n
+                # Cho phép chạy tiếp vòng thứ 2 nếu còn dư bước
+                if len(visited_in_tour) == car_n and steps + 5 > ctx.steps:
+                    break
+                if len(cur_t) >= car_n + 5:
                     break
             if len(cur_t) > len(best_t):
                 best_t = cur_t
@@ -350,64 +461,27 @@ def construct_master(ctx: DayContext, rng: Optional[random.Random] = None) -> Da
         b_spots = ctx.config.spots_by_brand.get(b, ())
         if not b_spots:
             continue
-
-        brand_counts: Dict[int, int] = {}
-        for t in tours:
-            for s in t:
-                br = ctx.spot_brand[s]
-                brand_counts[br] = brand_counts.get(br, 0) + 1
-
-        # 1. Thử thay thế spot của nhãn hàng dư thừa (không tăng tổng bước)
-        best_diff = INF
-        best_rep = None
-        for slot in range(ctx.n_patrols):
-            cells = [ctx.start_of_patrol(slot)] + [spot_cells[s] for s in tours[slot]]
-            for pos, old_sp in enumerate(tours[slot]):
-                old_br = ctx.spot_brand[old_sp]
-                if brand_counts.get(old_br, 0) > 1:
+        best_cand = None
+        best_detour = INF
+        for sp in b_spots:
+            sp_c = spot_cells[sp]
+            for slot in range(ctx.n_patrols):
+                cells = [ctx.start_of_patrol(slot)] + [spot_cells[s] for s in tours[slot]]
+                for pos in range(len(tours[slot]) + 1):
                     prev_c = cells[pos]
-                    nxt_c = cells[pos + 2] if pos + 2 < len(cells) else None
-                    for sp in b_spots:
-                        sp_c = spot_cells[sp]
-                        cur_dist = table.cost(prev_c, cells[pos + 1]) + (
-                            table.cost(cells[pos + 1], nxt_c) if nxt_c is not None else 0
-                        )
-                        new_dist = table.cost(prev_c, sp_c) + (
-                            table.cost(sp_c, nxt_c) if nxt_c is not None else 0
-                        )
-                        diff = new_dist - cur_dist
-                        if diff < best_diff:
-                            best_diff = diff
-                            best_rep = (slot, pos, sp, old_br)
-
-        if best_rep is not None and best_diff <= 4:
-            slot, pos, sp, old_br = best_rep
-            tours[slot][pos] = sp
-            brand_counts[old_br] -= 1
+                    nxt_c = cells[pos + 1] if pos + 1 < len(cells) else None
+                    detour = table.cost(prev_c, sp_c) + (
+                        table.cost(sp_c, nxt_c) - table.cost(prev_c, nxt_c)
+                        if nxt_c is not None
+                        else 0
+                    )
+                    if detour < best_detour:
+                        best_detour = detour
+                        best_cand = (slot, pos, sp)
+        if best_cand is not None:
+            slot, pos, sp = best_cand
+            tours[slot].insert(pos, sp)
             covered_brands.add(b)
-        else:
-            # 2. Thử chèn thông thường
-            best_cand = None
-            best_detour = INF
-            for sp in b_spots:
-                sp_c = spot_cells[sp]
-                for slot in range(ctx.n_patrols):
-                    cells = [ctx.start_of_patrol(slot)] + [spot_cells[s] for s in tours[slot]]
-                    for pos in range(len(tours[slot]) + 1):
-                        prev_c = cells[pos]
-                        nxt_c = cells[pos + 1] if pos + 1 < len(cells) else None
-                        detour = table.cost(prev_c, sp_c) + (
-                            table.cost(sp_c, nxt_c) - table.cost(prev_c, nxt_c)
-                            if nxt_c is not None
-                            else 0
-                        )
-                        if detour < best_detour:
-                            best_detour = detour
-                            best_cand = (slot, pos, sp)
-            if best_cand is not None:
-                slot, pos, sp = best_cand
-                tours[slot].insert(pos, sp)
-                covered_brands.add(b)
 
     meets: List[Meet] = []
     if ctx.n_cars > 0:
@@ -419,7 +493,7 @@ def construct_master(ctx: DayContext, rng: Optional[random.Random] = None) -> Da
                 idx = len(tours[slot]) // 2
                 meets.append(Meet(patrol=slot, stop_idx=idx, car=0))
 
-    sol = DaySolution(tours=tours, meets=meets, waits={})
+    sol = trim_excess_stock(ctx, DaySolution(tours=tours, meets=meets, waits={}))
     dec = decode(ctx, sol)
     if not dec.result.ok:
         return construct_standard(ctx, rng)

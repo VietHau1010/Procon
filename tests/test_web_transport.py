@@ -287,6 +287,27 @@ class EndToEndTest(unittest.TestCase):
         MatchSession(transport, seed=3, **kw).run()
         return transport.finish()
 
+    def test_replay_records_effective_planner_weights_and_settings(self):
+        from hexudon.planner_contest.objective import default_contest_weights
+        self.start()
+        qid = self.world.add_question("Q01", small_config(days=1), 11, "Practice Match",
+                                      practice=True, selection_seconds=1.0)
+        entries = []
+        transport = self.transport(qid, PRACTICE, replay=entries.append)
+        session = MatchSession(transport, search_seconds=0.1, role_seconds=0.0,
+                               net_margin=0.1, seed=7, planner="contest", replay=entries.append)
+        session.run()
+        contexts = [entry["planner_context"] for entry in entries if "planner_context" in entry]
+        self.assertEqual(len(contexts), 1)
+        context = contexts[0]
+        self.assertEqual(context, session.planner_context)
+        self.assertEqual(context["strategy_class"], "hexudon.planner_contest.strategy.MatchStrategist")
+        self.assertEqual(context["weights"]["road_park"], default_contest_weights().road_park)
+        self.assertEqual(context["seed"], 7)
+        self.assertEqual(context["search_seconds"], 0.1)
+        self.assertTrue(context["enable_dense"])
+        self.assertFalse(context["fast_roles"])
+
     def test_a_practice_match_submits_once_per_day_and_resets_before_and_after(self):
         self.start()
         qid = self.world.add_question("Q01", small_config(days=3), 11, "Practice Match",

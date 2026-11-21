@@ -3,6 +3,7 @@
 import json
 import os
 import time
+from dataclasses import asdict
 from typing import Callable, List, Optional
 
 from .. import rules
@@ -78,6 +79,7 @@ class MatchSession:
             self.log = log_both
         self.strategist: Optional[MatchStrategist] = None
         self.config: Optional[MatchConfig] = None
+        self.planner_context: Optional[dict] = None
         #: server có thể đánh số ngày từ 1 thay vì 0; học từ lần bị từ chối đầu tiên
         self.day_offset = 0
 
@@ -105,6 +107,21 @@ class MatchSession:
             net_margin=self.net_margin, role_seconds=self.role_seconds,
             seed=self.seed, log=self.log, emit=self.emit,
         )
+        self.planner_context = {
+            "strategy_class": f"{StratCls.__module__}.{StratCls.__qualname__}",
+            "weights": asdict(self.strategist.weights),
+            "seed": self.seed,
+            "search_seconds": self.search_seconds,
+            "role_seconds": self.role_seconds,
+            "net_margin": self.net_margin,
+            "enable_dense": getattr(self.strategist, "enable_dense", None),
+            "fast_roles": getattr(self.strategist, "fast_roles", None),
+            "enable_lookahead": getattr(self.strategist, "enable_lookahead", None),
+            "enable_tanker_search": getattr(self.strategist, "enable_tanker_search", None),
+        }
+        self.replay({"planner_context": self.planner_context})
+        self.log(f"planner: {self.planner_context['strategy_class']}; "
+                 f"road_park={self.strategist.weights.road_park}; seed={self.seed}")
         kinds = self.choose_roles()
         if self.emit is not None:
             # vai trò thật sự dùng: có thể khác vai trò đã chọn khi server không nhận

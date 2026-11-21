@@ -27,6 +27,7 @@ class Response:
     status: int                                    # 0 nghĩa là lỗi mạng hoặc quá hạn
     payload: object = None                         # JSON đã đọc; body lạ thành {"raw": ...}
     headers: Dict[str, str] = field(default_factory=dict)
+    error: Optional[str] = None                    # lỗi mạng đã scrub, nếu status == 0
 
 
 def load_env(path: str) -> Dict[str, str]:
@@ -112,6 +113,9 @@ class JsonHttp:
         self.raw_log = log or (lambda msg: None)
         self.replay = replay or (lambda entry: None)
         self.secrets = secrets or (lambda: ())
+        # urllib calls cannot be cancelled when the caller's wall-clock join
+        # expires. Keep at most one abandoned worker per JsonHttp instance.
+        self._attempt_lock = threading.Lock()
         if ssl_context is None and self.base.startswith("https://"):
             ssl_context = make_ssl_context(self.log)
         self.ssl_context = ssl_context
@@ -143,19 +147,73 @@ class JsonHttp:
         if budget <= 0:
             self.log(f"bỏ qua {method} {path}: đã quá hạn của ngày")
             return Response(0)
-        done: List[Response] = []
-        worker = threading.Thread(
-            target=lambda: done.append(self._blocking(method, path, params, body, headers, budget)),
-            daemon=True,
-        )
-        worker.start()
-        worker.join(budget)
-        if not done:
-            self.log(f"lỗi mạng {method} {path}: quá {budget:.1f}s, bỏ cuộc gọi")
-            self.replay({"t": time.time(), "method": method, "path": path,
-                         "status": 0, "error": f"wall-clock timeout {budget:.1f}s"})
-            return Response(0)
-        return done[0]
+        # A TLS handshake can fail transiently.  A single five-second urllib
+        # attempt used to consume the whole request budget, after which the
+        # transport had no useful time left to retry.  Split HTTPS calls into
+        # short attempts while keeping one hard wall-clock budget.  Repeating
+        # POST is safe here because the game endpoints replace the plan for the
+        # same (game, day); the existing transport also retries status 0.
+        started = time.monotonic()
+        attempts = 0
+        last_error = None
+        while True:
+            remaining = budget - (time.monotonic() - started)
+            if remaining <= 0:
+                last_error = f"wall-clock timeout {budget:.1f}s"
+                break
+            if not self._attempt_lock.acquire(timeout=remaining):
+                last_error = "previous HTTP attempt still in flight"
+                break
+            remaining = budget - (time.monotonic() - started)
+            if remaining <= 0:
+                self._attempt_lock.release()
+                last_error = f"wall-clock timeout {budget:.1f}s"
+                break
+            attempt_budget = remaining
+            if self.base.startswith("https://"):
+                # Normal in-game calls must stay short, but post-match
+                # /result and /replay explicitly receive a larger budget.
+                # Capping those calls at 2s made the nominal 30s retry budget
+                # effectively only 6s, losing the server replay needed for
+                # web-vs-simulator diagnosis.
+                cap = 10.0 if budget > 5.0 else 2.0
+                attempt_budget = min(attempt_budget, cap)
+            done: List[Response] = []
+
+            def run_attempt(budget_for_attempt=attempt_budget):
+                try:
+                    done.append(self._blocking(
+                        method, path, params, body, headers, budget_for_attempt))
+                finally:
+                    self._attempt_lock.release()
+
+            worker = threading.Thread(
+                target=run_attempt,
+                daemon=True,
+            )
+            try:
+                worker.start()
+            except Exception:
+                self._attempt_lock.release()
+                raise
+            worker.join(attempt_budget)
+            attempts += 1
+            if done:
+                response = done[0]
+                if response.status != 0:
+                    return response
+                last_error = response.error or "network error"
+            else:
+                last_error = f"wall-clock timeout {attempt_budget:.1f}s"
+            if attempts >= 3 or time.monotonic() - started >= budget - 0.05:
+                break
+            # Give the server/TLS stack a short chance to release the failed
+            # connection before opening the next one.
+            time.sleep(min(0.05, max(0.0, budget - (time.monotonic() - started))))
+        self.log(f"lỗi mạng {method} {path}: {last_error}, bỏ cuộc gọi")
+        self.replay({"t": time.time(), "method": method, "path": path,
+                     "status": 0, "error": last_error})
+        return Response(0, error=last_error)
 
     def _blocking(self, method, path, params, body, headers, timeout) -> Response:
         url = self.base + path
@@ -174,7 +232,7 @@ class JsonHttp:
         except Exception as exc:
             # ví dụ --url thiếu scheme: phải báo lỗi chứ không được ném ra ngoài
             self.log(f"URL không hợp lệ cho {method} {path}: {exc!r}")
-            return Response(0)
+            return Response(0, error="invalid URL")
         try:
             with urllib.request.urlopen(req, timeout=timeout, context=self.ssl_context) as resp:
                 status, raw, hdrs = resp.status, resp.read(), dict(resp.headers.items())
@@ -183,9 +241,7 @@ class JsonHttp:
             hdrs = dict(exc.headers.items()) if exc.headers is not None else {}
         except Exception as exc:
             error = self.scrub(repr(exc))
-            self.log(f"lỗi mạng {method} {path}: {error}")
-            self.replay({**entry, "status": 0, "error": error})
-            return Response(0)
+            return Response(0, error=error)
         payload = _parse_body(raw)
         self.replay({**entry, "status": status, "response": payload})
         return Response(status, payload, hdrs)

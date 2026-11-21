@@ -31,16 +31,8 @@ STRATEGIC_HUBS = [475, 579, 487, 831, 308]
 
 def choose_roles_for_match(num_agents: int, max_fuel: int, width: int, height: int) -> List[int]:
     """
-    TẦNG 1: Công thức chọn số lượng xe Roles đầu trận (Thích ứng 3..8 xe):
-    - N in [3, 6]: Dùng (N - 1) Patrol + 1 Refuel.
-    - N in [7, 8]:
-        + Nếu map <= 20x20 hoặc bình xăng >= 150: Dùng (N - 1) Patrol + 1 Refuel.
-        + Nếu map lớn (>= 600 ô) và bình xăng nhỏ (< 120): Dùng (N - 2) Patrol + 2 Refuel.
+    Compatibility helper: use exactly one refuel agent on every map.
     """
-    if num_agents <= 6:
-        return [rules.PATROL] * (num_agents - 1) + [rules.REFUEL]
-    if width * height >= 600 and max_fuel < 120:
-        return [rules.PATROL] * (num_agents - 2) + [rules.REFUEL, rules.REFUEL]
     return [rules.PATROL] * (num_agents - 1) + [rules.REFUEL]
 
 

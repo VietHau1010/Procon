@@ -8,9 +8,10 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from hexudon.client.net import USER_AGENT, JsonHttp, jwt_claims, load_env, make_ssl_context
+from hexudon.client.net import Response, USER_AGENT, JsonHttp, jwt_claims, load_env, make_ssl_context
 
 
 def fake_jwt(claims: dict) -> str:
@@ -134,6 +135,71 @@ class JsonHttpTest(unittest.TestCase):
     def test_unreachable_server_is_status_zero_not_an_exception(self):
         resp = JsonHttp("http://127.0.0.1:1", timeout=0.5).call("GET", "/x")
         self.assertEqual(resp.status, 0)
+
+    def test_https_transient_network_error_retries_inside_request_budget(self):
+        http = JsonHttp("https://example.invalid", timeout=1.0)
+        calls = []
+
+        def blocking(*args):
+            calls.append(1)
+            return (Response(0, error="URLError(TimeoutError('handshake'))")
+                    if len(calls) == 1 else Response(200, {"ok": True}))
+
+        with mock.patch.object(http, "_blocking", side_effect=blocking):
+            response = http.call("GET", "/state")
+        self.assertEqual(response.status, 200)
+        self.assertEqual(len(calls), 2)
+
+    def test_https_retry_still_respects_hard_deadline(self):
+        http = JsonHttp("https://example.invalid", timeout=2.0)
+
+        def blocking(*args):
+            time.sleep(0.2)
+            return Response(0, error="handshake")
+
+        with mock.patch.object(http, "_blocking", side_effect=blocking):
+            started = time.monotonic()
+            response = http.call("GET", "/state", deadline=started + 0.1)
+        self.assertEqual(response.status, 0)
+        self.assertLess(time.monotonic() - started, 0.5)
+
+    def test_https_post_match_budget_allows_long_replay_attempts(self):
+        http = JsonHttp("https://example.invalid", timeout=30.0)
+        budgets = []
+
+        def blocking(*args):
+            budgets.append(args[-1])
+            return Response(200, {"ok": True})
+
+        with mock.patch.object(http, "_blocking", side_effect=blocking):
+            response = http.call("GET", "/api/game/replay", timeout=30.0)
+        self.assertEqual(response.status, 200)
+        self.assertEqual(budgets, [10.0])
+
+    def test_timed_out_worker_does_not_spawn_overlapping_requests(self):
+        http = JsonHttp("https://example.invalid", timeout=0.05)
+        entered = threading.Event()
+        release = threading.Event()
+        calls = []
+
+        def blocking(*args):
+            calls.append(1)
+            if len(calls) == 1:
+                entered.set()
+                release.wait(1.0)
+            return Response(200, {"ok": True})
+
+        with mock.patch.object(http, "_blocking", side_effect=blocking):
+            self.assertEqual(http.call("GET", "/state").status, 0)
+            self.assertTrue(entered.is_set())
+            # The first worker is still blocked. A second call must not create
+            # another worker for the same HTTP client.
+            self.assertEqual(http.call("GET", "/state").status, 0)
+            self.assertEqual(len(calls), 1)
+            release.set()
+            response = http.call("GET", "/state", timeout=0.5)
+        self.assertEqual(response.status, 200)
+        self.assertEqual(len(calls), 2)
 
 
 if __name__ == "__main__":

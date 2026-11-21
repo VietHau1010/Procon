@@ -42,9 +42,64 @@ class RunnerUnitTest(unittest.TestCase):
         self.assertIn(os.path.abspath("x.env"), cmd)
         self.assertNotIn("--live", cmd)
         self.assertNotIn("--practice", cmd)
+        args.weights_run = "artifacts/train-web-fast-20261120"
+        weighted = web_runner.child_command(args, GameRef("qid-1", "Q05", 14, "Mock Contest", CONTEST),
+                                            "TEST_DAU_01", "/tmp/a-summary.json", "Mock Contest/Q05")
+        self.assertIn("--weights-run", weighted)
+        self.assertIn(os.path.abspath(args.weights_run), weighted)
         practice = web_runner.child_command(args, GameRef("qid-2", mode=PRACTICE), "TEST_DAU_02",
                                             "/tmp/b-summary.json", "b")
         self.assertIn("--practice", practice)
+
+    def test_weight_run_is_rejected_for_non_mock_games(self):
+        from hexudon.client.tokens import TeamToken
+        args = build_parser().parse_args(["web", "--game", "qid", "--weights-run", "some-run"])
+        tok = TeamToken(var="TEST_DAU_02", value="unused", env_path=".env", team_id=78)
+        with mock.patch.object(web_runner, "make_api") as make_api, \
+             mock.patch.object(web_runner, "resolve", return_value=[GameRef("qid", "Q1", 28, "Practice", PRACTICE)]):
+            code = web_runner.play_one(args, tok, log=lambda _: None)
+        self.assertEqual(code, 2)
+        make_api.assert_called_once()
+
+    def test_weighted_follow_child_verifies_mock_metadata_before_loading(self):
+        parent = build_parser().parse_args(["web", "--match", "14", "--follow",
+                                            "--weights-run", "some-run"])
+        ref = GameRef("qid", "Q03", 14, "Mock Contest", CONTEST)
+        command = web_runner.child_command(parent, ref, "TEST_DAU_02",
+                                            "audit-summary.json", "Mock Contest/Q03")
+        args = build_parser().parse_args(command[3:])
+        tok = TeamToken(var="TEST_DAU_02", value="unused", env_path=".env", team_id=78)
+        logs = []
+        with mock.patch.object(web_runner, "make_api"), \
+             mock.patch.object(web_runner, "fetch_questions", return_value=[ref]) as verify, \
+             mock.patch("hexudon.training.storage.load_policy",
+                        side_effect=ValueError("model-load-marker")) as load:
+            code = web_runner.play_one(args, tok, log=logs.append)
+        self.assertEqual(code, 2)
+        verify.assert_called_once()
+        load.assert_called_once_with(args.weights_run)
+        self.assertTrue(any("model-load-marker" in text for text in logs))
+
+    def test_weighted_child_cannot_use_mock_label_to_bypass_real_match_guard(self):
+        args = build_parser().parse_args(["web", "--game", "qid", "--label", "Mock Contest/Q03",
+                                          "--weights-run", "some-run"])
+        tok = TeamToken(var="TEST_DAU_02", value="unused", env_path=".env", team_id=78)
+        for refs in ([], [GameRef("qid", "Q03", 99, "Official Contest", CONTEST)]):
+            with self.subTest(refs=refs), mock.patch.object(web_runner, "make_api"), \
+                 mock.patch.object(web_runner, "fetch_questions", return_value=refs), \
+                 mock.patch("hexudon.training.storage.load_policy") as load:
+                self.assertEqual(web_runner.play_one(args, tok, log=lambda _: None), 2)
+                load.assert_not_called()
+
+    def test_weighted_child_fails_closed_when_manager_unavailable(self):
+        args = build_parser().parse_args(["web", "--game", "qid", "--weights-run", "some-run"])
+        tok = TeamToken(var="TEST_DAU_02", value="unused", env_path=".env", team_id=78)
+        with mock.patch.object(web_runner, "make_api"), \
+             mock.patch.object(web_runner, "fetch_questions",
+                               side_effect=web_runner.ResolveError("manager unavailable")), \
+             mock.patch("hexudon.training.storage.load_policy") as load:
+            self.assertEqual(web_runner.play_one(args, tok, log=lambda _: None), 2)
+        load.assert_not_called()
 
     def test_first_ctrl_c_only_stops_new_children_second_stops_all(self):
         args = argparse.Namespace(out_dir=tempfile.gettempdir(), live=False)

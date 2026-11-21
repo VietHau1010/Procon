@@ -165,7 +165,8 @@ def _window(ctx: DayContext, walk: PatrolWalk, sol: DaySolution, slot: int, stop
 
 
 def route_cars(ctx: DayContext, sol: DaySolution, walks: List[PatrolWalk],
-               alive: List[Meet], waits: Dict[Tuple[int, int], int], allow_wait: bool):
+               alive: List[Meet], waits: Dict[Tuple[int, int], int], allow_wait: bool,
+               meeting_order=None):
     """Định tuyến xe tiếp qua các điểm hẹn; bỏ điểm hẹn không kịp."""
     kept: List[Meet] = []
     dropped = 0
@@ -195,7 +196,10 @@ def route_cars(ctx: DayContext, sol: DaySolution, walks: List[PatrolWalk],
                 changed = True
                 continue
             ordered.append((win[1], m, win))
-        ordered.sort(key=lambda x: x[0])
+        if meeting_order is None:
+            ordered.sort(key=lambda x: x[0])
+        else:
+            ordered = meeting_order(ctx, car_slot, ordered, new_waits)
 
         for _, m, (cell, win_start, win_end) in ordered:
             path = ctx.dist_step.path(cur, cell) if cur != cell else []
@@ -260,7 +264,7 @@ def route_cars(ctx: DayContext, sol: DaySolution, walks: List[PatrolWalk],
     return kept, new_waits, car_plans, dropped, changed
 
 
-def build_plan(ctx: DayContext, sol: DaySolution):
+def build_plan(ctx: DayContext, sol: DaySolution, car_scheduler=None):
     """Dựng kế hoạch hành động cho cả đội."""
     waits = dict(sol.waits)
     alive = list(sol.meets)
@@ -274,7 +278,8 @@ def build_plan(ctx: DayContext, sol: DaySolution):
             if m.patrol < ctx.n_patrols:
                 meet_by_patrol[m.patrol][m.stop_idx] = m.car
         walks = [walk_patrol(ctx, sol, s, meet_by_patrol[s], waits) for s in range(ctx.n_patrols)]
-        alive, waits, car_plans, dropped, changed = route_cars(
+        scheduler = route_cars if car_scheduler is None else car_scheduler
+        alive, waits, car_plans, dropped, changed = scheduler(
             ctx, sol, walks, alive, waits, allow_wait=(rnd < MAX_ROUNDS - 1)
         )
         dropped_total += dropped
